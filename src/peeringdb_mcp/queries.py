@@ -4,6 +4,8 @@ import asyncio
 
 import httpx
 
+from .pricing_data import search_ix_pricing as search_ix_pricing  # re-export
+
 _BASE_URL = "https://www.peeringdb.com/api/"
 _AUTH_PROFILE_URL = "https://auth.peeringdb.com/profile/v1"
 

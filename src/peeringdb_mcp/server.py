@@ -432,6 +432,71 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["peeringdb_api_key", "id"],
             },
         ),
+        # ── IX Pricing tools ───────────────────────────────────────────────────
+        types.Tool(
+            name="search_ix_pricing",
+            description=(
+                "Search and compare internet exchange port pricing from a crowd-sourced "
+                "dataset (source: peering.exposed, maintained by Job Snijders et al.). "
+                "All prices are in EUR/month; cost/Mbps values assume 85% or 40% port "
+                "utilisation with NRC amortised over 3 years. "
+                "Returns entries sorted by cost efficiency (cheapest first by default). "
+                "Use this to find affordable IXPs, compare pricing across regions, or "
+                "check whether a specific exchange has public pricing."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    **_API_KEY_PARAM,
+                    "name": {
+                        "type": "string",
+                        "description": "Partial IXP name to search (case-insensitive)",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": (
+                            "Partial location string to filter by (city, country, or region). "
+                            "E.g. 'Amsterdam', 'Germany', 'United States'"
+                        ),
+                    },
+                    "secure_route_servers_only": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, only return IXPs with IRR/RPKI-filtering route servers "
+                            "(secure_route_servers = Yes)"
+                        ),
+                        "default": False,
+                    },
+                    "has_public_pricing": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, only return IXPs with publicly available pricing. "
+                            "If false, only return those without public pricing."
+                        ),
+                    },
+                    "max_price_100g": {
+                        "type": "number",
+                        "description": "Maximum 100GE port price in EUR/month",
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": (
+                            "Field to sort by. Options: cost_per_mbps_100g_85pct (default), "
+                            "cost_per_mbps_100g_40pct, cost_per_mbps_10g_85pct, "
+                            "cost_per_mbps_10g_40pct, price_100g_eur_month, "
+                            "price_10g_eur_month, price_400g_eur_month, ixp, location"
+                        ),
+                        "default": "cost_per_mbps_100g_85pct",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (default 50, max 158)",
+                        "default": 50,
+                    },
+                },
+                "required": ["peeringdb_api_key"],
+            },
+        ),
         types.Tool(
             name="get_my_profile",
             description=(
@@ -610,6 +675,29 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         if result is None:
             return _dump({"error": "not found", "tool": name})
         return _dump({"profile": result})
+
+    elif name == "search_ix_pricing":
+        limit = min(int(args.get("limit", 50)), 158)
+        rows = queries.search_ix_pricing(
+            api_key,
+            name=args.get("name"),
+            location=args.get("location"),
+            secure_route_servers_only=bool(args.get("secure_route_servers_only", False)),
+            has_public_pricing=args.get("has_public_pricing"),
+            max_price_100g=args.get("max_price_100g"),
+            sort_by=args.get("sort_by", "cost_per_mbps_100g_85pct"),
+            limit=limit,
+        )
+        return _dump({
+            "ix_pricing": rows,
+            "count": len(rows),
+            "source": "peering.exposed — Job Snijders et al. All prices EUR/month.",
+            "note": (
+                "cost_per_mbps values are cents/month/Mbps. "
+                "85pct = port at 85% utilisation, 40pct = 40% utilisation. "
+                "NRC amortised over 3 years."
+            ),
+        })
 
     return _dump({"error": f"Unknown tool: {name}", "tool": name})
 
