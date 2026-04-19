@@ -404,6 +404,77 @@ async def test_dispatch_find_common_exchanges_regional_flagged():
     assert "ixfac_set" not in result
 
 
+# ── _dispatch: get_ix_enrichment ────────────────────────────────────────────
+
+async def test_dispatch_get_ix_enrichment_found():
+    enrichment = {
+        "ixpdb_id": 42,
+        "pdb_id": 26,
+        "name": "AMS-IX",
+        "manrs": True,
+        "looking_glass_urls": ["https://lg.ams-ix.net"],
+        "traffic_api_url": "https://www.ams-ix.net/ams/statistics?type=log",
+        "association": "Euro-IX",
+        "participant_count": 950,
+        "location_count": 5,
+    }
+    with patch("peeringdb_mcp.server.queries.get_ix_enrichment", new=AsyncMock(return_value=enrichment)):
+        result = await _dispatch("get_ix_enrichment", {"ix_id": "26"}, "key")
+    assert "AMS-IX" in result
+    assert "manrs" in result
+    assert "ix_enrichment" in result
+
+
+async def test_dispatch_get_ix_enrichment_not_found():
+    with patch("peeringdb_mcp.server.queries.get_ix_enrichment", new=AsyncMock(return_value=None)):
+        result = await _dispatch("get_ix_enrichment", {"ix_id": "9999"}, "key")
+    assert "not found" in result
+    assert "IXPDB" in result
+
+
+# ── _dispatch: get_ix_traffic ────────────────────────────────────────────────
+
+async def test_dispatch_get_ix_traffic_success():
+    traffic = {
+        "ix_id": 26,
+        "ixpdb_name": "AMS-IX",
+        "period": "day",
+        "category": "bits",
+        "traffic_url": "https://www.ams-ix.net/ams/statistics?type=json&period=day&category=bits",
+        "current_in_bps": 8_500_000_000_000,
+        "current_out_bps": 8_200_000_000_000,
+        "average_in_bps": 7_000_000_000_000,
+        "average_out_bps": 6_800_000_000_000,
+        "peak_in_bps": 10_200_000_000_000,
+        "peak_out_bps": 9_800_000_000_000,
+        "peak_in_at": "2025-01-15 14:00:00",
+        "peak_out_at": "2025-01-15 14:05:00",
+        "total_in_bits": 5_040_000_000_000_000,
+        "total_out_bits": 4_896_000_000_000_000,
+    }
+    with patch("peeringdb_mcp.server.queries.get_ix_traffic", new=AsyncMock(return_value=traffic)):
+        result = await _dispatch("get_ix_traffic", {"ix_id": "26"}, "key")
+    assert "ix_traffic" in result
+    assert "AMS-IX" in result
+    assert "current_in_bps" in result
+
+
+async def test_dispatch_get_ix_traffic_defaults():
+    traffic = {"ix_id": 26, "ixpdb_name": "AMS-IX", "period": "day", "category": "bits"}
+    mock = AsyncMock(return_value=traffic)
+    with patch("peeringdb_mcp.server.queries.get_ix_traffic", new=mock):
+        await _dispatch("get_ix_traffic", {"ix_id": "26"}, "key")
+    mock.assert_called_once_with("key", 26, period="day", category="bits")
+
+
+async def test_dispatch_get_ix_traffic_custom_period():
+    traffic = {"ix_id": 26, "ixpdb_name": "AMS-IX", "period": "week", "category": "pkts"}
+    mock = AsyncMock(return_value=traffic)
+    with patch("peeringdb_mcp.server.queries.get_ix_traffic", new=mock):
+        await _dispatch("get_ix_traffic", {"ix_id": "26", "period": "week", "category": "pkts"}, "key")
+    mock.assert_called_once_with("key", 26, period="week", category="pkts")
+
+
 # ── create_app ─────────────────────────────────────────────────────────────────
 
 def test_create_app_returns_starlette():

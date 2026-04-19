@@ -452,3 +452,207 @@ async def test_auth_header_sent():
     route = respx.get(f"{_API}/net").mock(return_value=_ok([]))
     await queries.search_networks(_KEY)
     assert route.calls[0].request.headers["authorization"] == f"Api-Key {_KEY}"
+
+
+# ── _traffic_json_url ──────────────────────────────────────────────────────────
+
+def test_traffic_json_url_replaces_type_log():
+    url = "https://ix.example.com/statistics?type=log&period=day"
+    result = queries._traffic_json_url(url, "day", "bits")
+    assert "type=json" in result
+    assert "type=log" not in result
+
+
+def test_traffic_json_url_sets_period():
+    url = "https://ix.example.com/statistics?type=log"
+    result = queries._traffic_json_url(url, "week", "bits")
+    assert "period=week" in result
+
+
+def test_traffic_json_url_sets_category():
+    url = "https://ix.example.com/statistics?type=log"
+    result = queries._traffic_json_url(url, "day", "pkts")
+    assert "category=pkts" in result
+
+
+def test_traffic_json_url_replaces_existing_period():
+    url = "https://ix.example.com/statistics?type=log&period=month"
+    result = queries._traffic_json_url(url, "week", "bits")
+    assert "period=week" in result
+    assert "period=month" not in result
+
+
+def test_traffic_json_url_no_type_param():
+    url = "https://ix.example.com/statistics"
+    result = queries._traffic_json_url(url, "day", "bits")
+    assert "type=json" in result
+
+
+def test_traffic_json_url_preserves_host_and_path():
+    url = "https://www.ams-ix.net/ams/statistics?type=log"
+    result = queries._traffic_json_url(url, "day", "bits")
+    assert result.startswith("https://www.ams-ix.net/ams/statistics")
+
+
+# ── get_ix_enrichment ──────────────────────────────────────────────────────────
+
+_IXPDB_LIST = "https://api.ixpdb.net/v1/provider/list"
+
+_IXPDB_PROVIDERS = [
+    {
+        "id": 42,
+        "pdb_id": 26,
+        "name": "AMS-IX",
+        "manrs": True,
+        "looking_glass": [{"url": "https://lg.ams-ix.net"}],
+        "apis": {"traffic": "https://www.ams-ix.net/ams/statistics?type=log"},
+        "organization": {"association": "Euro-IX"},
+        "participant_count": 950,
+        "location_count": 5,
+    },
+    {
+        "id": 7,
+        "pdb_id": 99,
+        "name": "SAMPLE-IX",
+        "manrs": False,
+        "looking_glass": [],
+        "apis": {},
+        "organization": {},
+        "participant_count": 10,
+        "location_count": 1,
+    },
+]
+
+
+@respx.mock
+async def test_get_ix_enrichment_found():
+    respx.get(_IXPDB_LIST).mock(
+        return_value=httpx.Response(200, json=_IXPDB_PROVIDERS)
+    )
+    result = await queries.get_ix_enrichment(_KEY, 26)
+    assert result is not None
+    assert result["ixpdb_id"] == 42
+    assert result["pdb_id"] == 26
+    assert result["name"] == "AMS-IX"
+    assert result["manrs"] is True
+    assert result["looking_glass_urls"] == ["https://lg.ams-ix.net"]
+    assert result["traffic_api_url"] == "https://www.ams-ix.net/ams/statistics?type=log"
+    assert result["association"] == "Euro-IX"
+    assert result["participant_count"] == 950
+    assert result["location_count"] == 5
+
+
+@respx.mock
+async def test_get_ix_enrichment_not_found():
+    respx.get(_IXPDB_LIST).mock(
+        return_value=httpx.Response(200, json=_IXPDB_PROVIDERS)
+    )
+    result = await queries.get_ix_enrichment(_KEY, 9999)
+    assert result is None
+
+
+@respx.mock
+async def test_get_ix_enrichment_no_traffic_url():
+    respx.get(_IXPDB_LIST).mock(
+        return_value=httpx.Response(200, json=_IXPDB_PROVIDERS)
+    )
+    result = await queries.get_ix_enrichment(_KEY, 99)
+    assert result is not None
+    assert result["traffic_api_url"] is None
+    assert result["looking_glass_urls"] == []
+
+
+@respx.mock
+async def test_get_ix_enrichment_looking_glass_string_array():
+    # Some providers may return looking_glass as plain string URLs
+    providers = [{
+        "id": 1, "pdb_id": 5, "name": "TEST-IX", "manrs": False,
+        "looking_glass": ["https://lg.test-ix.net"],
+        "apis": {}, "organization": {},
+    }]
+    respx.get(_IXPDB_LIST).mock(return_value=httpx.Response(200, json=providers))
+    result = await queries.get_ix_enrichment(_KEY, 5)
+    assert result["looking_glass_urls"] == ["https://lg.test-ix.net"]
+
+
+@respx.mock
+async def test_get_ix_enrichment_ixpdb_server_error():
+    respx.get(_IXPDB_LIST).mock(return_value=httpx.Response(500))
+    with pytest.raises(ValueError, match="IXPDB returned HTTP 500"):
+        await queries.get_ix_enrichment(_KEY, 26)
+
+
+@respx.mock
+async def test_get_ix_enrichment_network_error():
+    respx.get(_IXPDB_LIST).mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(ValueError, match="Could not reach IXPDB"):
+        await queries.get_ix_enrichment(_KEY, 26)
+
+
+# ── get_ix_traffic ─────────────────────────────────────────────────────────────
+
+_TRAFFIC_URL = "https://www.ams-ix.net/ams/statistics?type=log"
+_TRAFFIC_JSON_URL = "https://www.ams-ix.net/ams/statistics?type=json&period=day&category=bits"
+
+_TRAFFIC_RESPONSE = {
+    "curin": 8_500_000_000_000,
+    "curout": 8_200_000_000_000,
+    "averagein": 7_000_000_000_000,
+    "averageout": 6_800_000_000_000,
+    "maxin": 10_200_000_000_000,
+    "maxout": 9_800_000_000_000,
+    "maxinat": "2025-01-15 14:00:00",
+    "maxoutat": "2025-01-15 14:05:00",
+    "totalin": 5_040_000_000_000_000,
+    "totalout": 4_896_000_000_000_000,
+}
+
+
+@respx.mock
+async def test_get_ix_traffic_success():
+    respx.get(_IXPDB_LIST).mock(
+        return_value=httpx.Response(200, json=_IXPDB_PROVIDERS)
+    )
+    # Match any URL that starts with the statistics path (params may vary in order)
+    respx.get(url__startswith="https://www.ams-ix.net/ams/statistics").mock(
+        return_value=httpx.Response(200, json=_TRAFFIC_RESPONSE)
+    )
+    result = await queries.get_ix_traffic(_KEY, 26, period="day", category="bits")
+    assert result["ix_id"] == 26
+    assert result["ixpdb_name"] == "AMS-IX"
+    assert result["period"] == "day"
+    assert result["category"] == "bits"
+    assert result["current_in_bps"] == 8_500_000_000_000
+    assert result["peak_in_bps"] == 10_200_000_000_000
+    assert result["peak_in_at"] == "2025-01-15 14:00:00"
+
+
+@respx.mock
+async def test_get_ix_traffic_not_in_ixpdb():
+    respx.get(_IXPDB_LIST).mock(
+        return_value=httpx.Response(200, json=_IXPDB_PROVIDERS)
+    )
+    with pytest.raises(ValueError, match="not found in IXPDB"):
+        await queries.get_ix_traffic(_KEY, 9999)
+
+
+@respx.mock
+async def test_get_ix_traffic_no_traffic_url():
+    respx.get(_IXPDB_LIST).mock(
+        return_value=httpx.Response(200, json=_IXPDB_PROVIDERS)
+    )
+    # pdb_id=99 has no traffic URL
+    with pytest.raises(ValueError, match="No traffic API URL"):
+        await queries.get_ix_traffic(_KEY, 99)
+
+
+@respx.mock
+async def test_get_ix_traffic_api_error():
+    respx.get(_IXPDB_LIST).mock(
+        return_value=httpx.Response(200, json=_IXPDB_PROVIDERS)
+    )
+    respx.get(url__startswith="https://www.ams-ix.net/ams/statistics").mock(
+        return_value=httpx.Response(503)
+    )
+    with pytest.raises(ValueError, match="Traffic API returned HTTP 503"):
+        await queries.get_ix_traffic(_KEY, 26)

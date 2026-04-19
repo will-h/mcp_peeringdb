@@ -568,6 +568,70 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["peeringdb_api_key"],
             },
         ),
+        # ── IXPDB real-time enrichment tools ───────────────────────────────────
+        types.Tool(
+            name="get_ix_enrichment",
+            description=(
+                "Fetch real-time supplementary data for an internet exchange from IXPDB "
+                "(api.ixpdb.net), keyed by its PeeringDB IX ID. "
+                "Returns MANRS routing-security certification status (bool), "
+                "looking glass URLs, traffic API URL, industry association membership, "
+                "and IXPDB participant/location counts. "
+                "Data is fetched live — not cached. "
+                "Returns not-found if the IXP is not registered in IXPDB (~1100 of ~1900 "
+                "PeeringDB IXPs have IXPDB coverage). "
+                "MANRS certification means the IXP filters routes on its route servers "
+                "using IRR and/or RPKI."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    **_API_KEY_PARAM,
+                    "ix_id": {
+                        "type": "integer",
+                        "description": "PeeringDB IX ID (same as the 'id' field in get_exchange)",
+                    },
+                },
+                "required": ["peeringdb_api_key", "ix_id"],
+            },
+        ),
+        types.Tool(
+            name="get_ix_traffic",
+            description=(
+                "Fetch live aggregate traffic statistics for an internet exchange directly "
+                "from its IXP Manager instance, via the traffic API URL registered in IXPDB. "
+                "Data is fetched in real time — not cached. "
+                "Returns current, average, peak, and total traffic (in bps or pps) for the "
+                "chosen time period. "
+                "Only works for IXPs that (a) have IXPDB coverage and (b) have registered "
+                "a traffic API URL — approximately 96 IXPs globally. "
+                "period: day | week | month | year. "
+                "category: bits (bps) | pkts (pps)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    **_API_KEY_PARAM,
+                    "ix_id": {
+                        "type": "integer",
+                        "description": "PeeringDB IX ID",
+                    },
+                    "period": {
+                        "type": "string",
+                        "description": "Time period: day, week, month, or year (default: day)",
+                        "enum": ["day", "week", "month", "year"],
+                        "default": "day",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Metric: bits (bps) or pkts (packets/s) (default: bits)",
+                        "enum": ["bits", "pkts"],
+                        "default": "bits",
+                    },
+                },
+                "required": ["peeringdb_api_key", "ix_id"],
+            },
+        ),
     ]
 
 
@@ -756,6 +820,21 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
                 "NRC amortised over 3 years."
             ),
         })
+
+    elif name == "get_ix_enrichment":
+        ix_id = int(args["ix_id"])
+        result = await queries.get_ix_enrichment(api_key, ix_id)
+        if result is None:
+            return _dump({"error": "not found", "tool": name,
+                          "note": "This IXP is not registered in IXPDB"})
+        return _dump({"ix_enrichment": result})
+
+    elif name == "get_ix_traffic":
+        ix_id = int(args["ix_id"])
+        period = args.get("period", "day")
+        category = args.get("category", "bits")
+        result = await queries.get_ix_traffic(api_key, ix_id, period=period, category=category)
+        return _dump({"ix_traffic": result})
 
     return _dump({"error": f"Unknown tool: {name}", "tool": name})
 

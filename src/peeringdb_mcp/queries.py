@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -8,6 +9,7 @@ from .pricing_data import search_ix_pricing as search_ix_pricing  # re-export
 
 _BASE_URL = "https://www.peeringdb.com/api/"
 _AUTH_PROFILE_URL = "https://auth.peeringdb.com/profile/v1"
+_IXPDB_BASE = "https://api.ixpdb.net/v1"
 
 # Semaphore used to pace multi-request tools to ~1 req/s per PeeringDB guidelines.
 _RATE_LIMIT = asyncio.Semaphore(1)
@@ -480,3 +482,132 @@ async def get_my_profile(api_key: str) -> dict | None:
         return None
     _check_status(resp)
     return resp.json()
+
+
+# ── IXPDB enrichment tools ─────────────────────────────────────────────────────
+
+def _traffic_json_url(raw_url: str, period: str, category: str) -> str:
+    """Transform an IXPDB traffic URL to request IXP Manager JSON aggregate stats.
+
+    Replaces the type parameter with 'json' (IXP Manager's machine-readable
+    output format) and sets period and category query parameters.
+    """
+    parsed = urlparse(raw_url.strip())
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    params["type"] = ["json"]
+    params["period"] = [period]
+    params["category"] = [category]
+    new_query = urlencode({k: v[0] for k, v in params.items()})
+    return urlunparse(parsed._replace(query=new_query))
+
+
+async def get_ix_enrichment(api_key: str, ix_id: int) -> dict | None:
+    """Fetch real-time IXPDB data for a PeeringDB exchange ID.
+
+    Returns MANRS status, looking glass URLs, traffic API URL, and association
+    membership. Returns None if the IXP is not registered in IXPDB.
+    api_key is accepted for interface consistency but IXPDB is public.
+    """
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        try:
+            resp = await client.get(f"{_IXPDB_BASE}/provider/list")
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach IXPDB: {exc}") from exc
+    if resp.status_code != 200:
+        raise ValueError(f"IXPDB returned HTTP {resp.status_code}")
+
+    provider = None
+    for p in resp.json():
+        if p.get("pdb_id") == ix_id:
+            provider = p
+            break
+
+    if provider is None:
+        return None
+
+    # looking_glass may be a list of strings or a list of objects with a 'url' key
+    raw_lg = provider.get("looking_glass") or []
+    lg_urls: list[str] = []
+    for lg in raw_lg:
+        if isinstance(lg, str) and lg:
+            lg_urls.append(lg)
+        elif isinstance(lg, dict) and lg.get("url"):
+            lg_urls.append(lg["url"])
+
+    apis = provider.get("apis") or {}
+    traffic_url = apis.get("traffic") or None
+
+    org = provider.get("organization") or {}
+
+    return {
+        "ixpdb_id": provider.get("id"),
+        "pdb_id": ix_id,
+        "name": provider.get("name"),
+        "manrs": provider.get("manrs", False),
+        "looking_glass_urls": lg_urls,
+        "traffic_api_url": traffic_url,
+        "association": org.get("association"),
+        "participant_count": provider.get("participant_count"),
+        "location_count": provider.get("location_count"),
+    }
+
+
+async def get_ix_traffic(
+    api_key: str,
+    ix_id: int,
+    period: str = "day",
+    category: str = "bits",
+) -> dict:
+    """Fetch live aggregate traffic stats for an IXP from its IXP Manager instance.
+
+    Step 1: Queries IXPDB in real time to discover the traffic API URL.
+    Step 2: Transforms the URL to request JSON output for the requested period.
+    Step 3: Fetches live stats from the IXP's own IXP Manager instance.
+
+    period: day | week | month | year
+    category: bits | pkts
+    api_key is accepted for interface consistency but IXPDB is public.
+    """
+    enrichment = await get_ix_enrichment(api_key, ix_id)
+    if enrichment is None:
+        raise ValueError(f"IXP with PeeringDB ID {ix_id} not found in IXPDB")
+
+    traffic_url = enrichment.get("traffic_api_url")
+    if not traffic_url:
+        raise ValueError(
+            f"No traffic API URL registered in IXPDB for IXP {ix_id} "
+            f"({enrichment.get('name', 'unknown')})"
+        )
+
+    json_url = _traffic_json_url(traffic_url, period, category)
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        try:
+            resp = await client.get(json_url)
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach traffic API: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Traffic API returned HTTP {resp.status_code} for IXP {ix_id}"
+        )
+
+    raw = resp.json()
+
+    return {
+        "ix_id": ix_id,
+        "ixpdb_name": enrichment.get("name"),
+        "period": period,
+        "category": category,
+        "traffic_url": json_url,
+        "current_in_bps": raw.get("curin"),
+        "current_out_bps": raw.get("curout"),
+        "average_in_bps": raw.get("averagein"),
+        "average_out_bps": raw.get("averageout"),
+        "peak_in_bps": raw.get("maxin"),
+        "peak_out_bps": raw.get("maxout"),
+        "peak_in_at": raw.get("maxinat"),
+        "peak_out_at": raw.get("maxoutat"),
+        "total_in_bits": raw.get("totalin"),
+        "total_out_bits": raw.get("totalout"),
+    }
